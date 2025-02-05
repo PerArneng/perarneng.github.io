@@ -1,1 +1,306 @@
-hi
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Draggable Floating Turquoise Numbers Grid – Snake Follow</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: black;
+    }
+    canvas {
+      display: block;
+      position: fixed;
+      top: 0;
+      left: 0;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+  <script>
+    // ──────────────────────────────────────────────
+    // Global Variables and Setup
+    // ──────────────────────────────────────────────
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+
+    let gridCells = [];      // All cells in the grid.
+    let draggedCells = [];   // Cells that are currently dragged (as a snake chain).
+
+    // Drag state and mouse position tracking.
+    let isDragging = false;
+    let mouseX = null, mouseY = null;        // Normal mouse position.
+    let dragMouseX = null, dragMouseY = null;  // Updated during dragging.
+
+    // Configuration parameters.
+    const gridSpacing = 80;
+    const floatAmplitude = 3;         // Base oscillation amplitude.
+    const floatSpeed = 1;
+    const magnetInfluenceRadius = 80;
+    const magnetMaxOffset = 10;
+    const baseFontSize = 24;          // Base font size.
+    const fadeDuration = 1000;        // Fade-out duration (ms) after mouseup.
+
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+
+    // ──────────────────────────────────────────────
+    // Grid Initialization
+    // ──────────────────────────────────────────────
+    function initGrid() {
+      gridCells = [];
+      const currentTime = performance.now() * 0.001;
+      for (let y = 0; y <= canvas.height; y += gridSpacing) {
+        for (let x = 0; x <= canvas.width; x += gridSpacing) {
+          let row = y / gridSpacing;
+          let col = x / gridSpacing;
+          gridCells.push({
+            baseX: x,
+            baseY: y,
+            row: row,
+            col: col,
+            num: Math.floor(Math.random() * 10),
+            phaseX: Math.random() * Math.PI * 2,
+            phaseY: Math.random() * Math.PI * 2,
+            nextChange: currentTime + (3 + Math.random() * 2)
+          });
+        }
+      }
+    }
+
+    function resize() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+      initGrid();
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    // ──────────────────────────────────────────────
+    // Helper: Compute Draw Properties for a Grid Cell
+    // ──────────────────────────────────────────────
+    // This computes the current drawn position (with base oscillation and magnet offset),
+    // plus a scaling factor (up to 3×) and alpha (up to 20% reduced) when near the mouse.
+    function computeCellDrawProperties(cell, refMouseX, refMouseY, time) {
+      let offsetX = floatAmplitude * Math.sin(time + cell.phaseX);
+      let offsetY = floatAmplitude * Math.cos(time + cell.phaseY);
+      let currentX = cell.baseX + offsetX;
+      let currentY = cell.baseY + offsetY;
+      let scaleFactor = 1;
+      let alpha = 1;
+      if (refMouseX !== null && refMouseY !== null) {
+        const dx = refMouseX - currentX;
+        const dy = refMouseY - currentY;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < magnetInfluenceRadius && dist > 0.001) {
+          const factor = 1 - dist / magnetInfluenceRadius;
+          currentX += (dx / dist) * factor * magnetMaxOffset;
+          currentY += (dy / dist) * factor * magnetMaxOffset;
+          scaleFactor = 1 + factor * 2;  // Up to 3× size.
+          alpha = 1 - factor * 0.2;      // Up to 20% more transparent.
+        }
+      }
+      return { currentX, currentY, scaleFactor, alpha };
+    }
+
+    // ──────────────────────────────────────────────
+    // Helper: Order Dragged Cells into a Snake Chain
+    // ──────────────────────────────────────────────
+    // Given a group (an array of grid cells) and the click position,
+    // reorder them using a greedy nearest–neighbor algorithm, with the clicked cell as the head.
+    function orderDraggedCells(group, clickX, clickY, time, selectedCell) {
+      // First, compute each cell’s drawn properties (at the time of mousedown)
+      let cellsWithProps = group.map(cell => {
+        const props = computeCellDrawProperties(cell, clickX, clickY, time);
+        return { cell, props };
+      });
+      // Find the object corresponding to the clicked cell.
+      let headIndex = cellsWithProps.findIndex(item => item.cell === selectedCell.cell);
+      if (headIndex < 0) headIndex = 0;
+      let chain = [];
+      chain.push(cellsWithProps.splice(headIndex, 1)[0]);
+      // Greedily add the nearest cell from the remaining ones.
+      while (cellsWithProps.length > 0) {
+        let last = chain[chain.length - 1];
+        let bestIndex = 0;
+        let bestDist = Infinity;
+        for (let i = 0; i < cellsWithProps.length; i++) {
+          const dx = cellsWithProps[i].props.currentX - last.props.currentX;
+          const dy = cellsWithProps[i].props.currentY - last.props.currentY;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          if (dist < bestDist) {
+            bestDist = dist;
+            bestIndex = i;
+          }
+        }
+        chain.push(cellsWithProps.splice(bestIndex, 1)[0]);
+      }
+      // Convert the chain objects into our dragged cell objects.
+      let ordered = chain.map(item => {
+        return {
+          num: item.cell.num,
+          fixedScale: item.props.scaleFactor,
+          currentX: item.props.currentX,
+          currentY: item.props.currentY,
+          fixedAlpha: item.props.alpha,
+          // Each segment gets a slight random lerp speed for natural variation.
+          lerpSpeed: 0.1 + Math.random() * 0.05,
+          fading: false,
+          fadeStartTime: null,
+          row: item.cell.row,
+          col: item.cell.col
+        };
+      });
+      return ordered;
+    }
+
+    // ──────────────────────────────────────────────
+    // Mouse Event Handling
+    // ──────────────────────────────────────────────
+    canvas.addEventListener('mousemove', (e) => {
+      const rect = canvas.getBoundingClientRect();
+      mouseX = e.clientX - rect.left;
+      mouseY = e.clientY - rect.top;
+      if (isDragging) {
+        dragMouseX = mouseX;
+        dragMouseY = mouseY;
+      }
+    });
+
+    canvas.addEventListener('mousedown', (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const clickX = e.clientX - rect.left;
+      const clickY = e.clientY - rect.top;
+      const time = performance.now() * 0.001 * floatSpeed;
+      let selectedCell = null;
+      let minDist = Infinity;
+      // Determine which grid cell is closest to the click (within 20 pixels).
+      for (let cell of gridCells) {
+        const props = computeCellDrawProperties(cell, clickX, clickY, time);
+        const dx = clickX - props.currentX;
+        const dy = clickY - props.currentY;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < 20 && dist < minDist) {
+          selectedCell = { cell, props };
+          minDist = dist;
+        }
+      }
+      if (selectedCell) {
+        const selRow = selectedCell.cell.row;
+        const selCol = selectedCell.cell.col;
+        // Pick the group: the selected cell plus its adjacent neighbors.
+        let group = gridCells.filter(cell =>
+          Math.abs(cell.row - selRow) <= 1 && Math.abs(cell.col - selCol) <= 1
+        );
+        // Order the group into a snake chain.
+        draggedCells = orderDraggedCells(group, clickX, clickY, time, selectedCell);
+        // Remove the dragged cells from the grid.
+        gridCells = gridCells.filter(cell =>
+          !(Math.abs(cell.row - selRow) <= 1 && Math.abs(cell.col - selCol) <= 1)
+        );
+        // Immediately replace their positions in the grid with new cells.
+        group.forEach(cell => {
+          gridCells.push({
+            baseX: cell.baseX,
+            baseY: cell.baseY,
+            row: cell.row,
+            col: cell.col,
+            num: Math.floor(Math.random() * 10),
+            phaseX: Math.random() * Math.PI * 2,
+            phaseY: Math.random() * Math.PI * 2,
+            nextChange: performance.now() * 0.001 + (3 + Math.random() * 2)
+          });
+        });
+        isDragging = true;
+        dragMouseX = clickX;
+        dragMouseY = clickY;
+      }
+    });
+
+    canvas.addEventListener('mouseup', () => {
+      if (isDragging) {
+        draggedCells.forEach(d => {
+          d.fading = true;
+          d.fadeStartTime = performance.now();
+        });
+        isDragging = false;
+      }
+    });
+
+    // ──────────────────────────────────────────────
+    // Animation Loop
+    // ──────────────────────────────────────────────
+    function animate() {
+      requestAnimationFrame(animate);
+
+      // Draw a translucent black overlay for a CRT–like trailing effect.
+      ctx.fillStyle = "rgba(0, 0, 0, 0.1)";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      const time = performance.now() * 0.001 * floatSpeed;
+      ctx.font = baseFontSize + "px monospace";
+      ctx.filter = "blur(1px)";
+
+      // Draw grid cells (those not being dragged).
+      gridCells.forEach(cell => {
+        if (time >= cell.nextChange) {
+          cell.num = Math.floor(Math.random() * 10);
+          cell.nextChange = time + (3 + Math.random() * 2);
+        }
+        const props = computeCellDrawProperties(cell, mouseX, mouseY, time);
+        ctx.save();
+        ctx.translate(props.currentX, props.currentY);
+        ctx.scale(props.scaleFactor, props.scaleFactor);
+        ctx.globalAlpha = props.alpha;
+        ctx.fillStyle = "turquoise";
+        ctx.fillText(cell.num, 0, 0);
+        ctx.restore();
+      });
+
+      // Update and draw dragged (snake) cells.
+      if (draggedCells.length > 0) {
+        if (!draggedCells[0].fading) {
+          // Head of the snake follows the cursor.
+          draggedCells[0].currentX += (dragMouseX - draggedCells[0].currentX) * draggedCells[0].lerpSpeed;
+          draggedCells[0].currentY += (dragMouseY - draggedCells[0].currentY) * draggedCells[0].lerpSpeed;
+          // Each subsequent segment follows the previous segment.
+          for (let i = 1; i < draggedCells.length; i++) {
+            draggedCells[i].currentX += (draggedCells[i-1].currentX - draggedCells[i].currentX) * draggedCells[i].lerpSpeed;
+            draggedCells[i].currentY += (draggedCells[i-1].currentY - draggedCells[i].currentY) * draggedCells[i].lerpSpeed;
+          }
+        } else {
+          // If fading, update alpha over time.
+          for (let i = draggedCells.length - 1; i >= 0; i--) {
+            let d = draggedCells[i];
+            let elapsed = performance.now() - d.fadeStartTime;
+            let fadeFactor = Math.max(1 - elapsed / fadeDuration, 0);
+            if (fadeFactor <= 0) {
+              draggedCells.splice(i, 1);
+              continue;
+            }
+            d.currentAlpha = d.fixedAlpha * fadeFactor;
+          }
+        }
+        // Draw the snake segments.
+        draggedCells.forEach(d => {
+          ctx.save();
+          ctx.translate(d.currentX, d.currentY);
+          ctx.scale(d.fixedScale, d.fixedScale);
+          ctx.globalAlpha = d.fading ? d.currentAlpha : d.fixedAlpha;
+          ctx.fillStyle = "turquoise";
+          ctx.fillText(d.num, 0, 0);
+          ctx.restore();
+        });
+      }
+      
+      ctx.filter = "none";
+    }
+    
+    animate();
+  </script>
+</body>
+</html>
+
